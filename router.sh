@@ -11,16 +11,14 @@ CONFIG_FILE="/etc/router-mode/config"
 CONFIG_DIR="/etc/router-mode"
 SCRIPT_INSTALL_PATH="/usr/local/sbin/router-mode"
 
-log() {
-    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
+log() { 
+    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" 
 }
-
-error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
+error() { 
+    echo -e "${RED}[ERROR]${NC} $1" >&2 
 }
-
-warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+warning() { 
+    echo -e "${YELLOW}[WARNING]${NC} $1" 
 }
 
 check_root() {
@@ -38,10 +36,16 @@ load_config() {
     return 1
 }
 
+validate_config() {
+    if [ -z "${AP_NAME:-}" ] || [ -z "${AP_PASSWORD:-}" ]; then
+        return 1
+    fi
+    return 0
+}
+
 save_config() {
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_FILE" <<EOF
-# Router mode configuration
 AP_IFACE="$AP_IFACE"
 WAN_IFACE="$WAN_IFACE"
 AP_NAME="$AP_NAME"
@@ -50,6 +54,8 @@ LAN_GW="$LAN_GW"
 LAN_DHCP_START="$LAN_DHCP_START"
 LAN_DHCP_END="$LAN_DHCP_END"
 LAN_DNS="$LAN_DNS"
+DISABLE_GUI="$DISABLE_GUI"
+ENABLE_AT_BOOT="$ENABLE_AT_BOOT"
 EOF
     chmod 600 "$CONFIG_FILE"
 }
@@ -101,7 +107,7 @@ cleanup_router() {
 
     log "Restarting NetworkManager..."
     systemctl restart NetworkManager || true
-    
+
     enable_graphical_interface
 }
 
@@ -113,7 +119,7 @@ detect_interfaces() {
 
     for iface in "${available_wifi_interfaces[@]:-}"; do
         if [ -z "$iface" ]; then continue; fi
-        
+
         phy="phy$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print $2}' || echo "")"
         if [ -n "$phy" ] && iw "$phy" info 2>/dev/null | grep -q 'AP$'; then
             supported_wifi_interfaces+=("$iface")
@@ -182,9 +188,8 @@ configure_hostapd() {
     log "Configuring hostapd..."
     [ -f /etc/hostapd/hostapd.conf ] && [ ! -f /etc/hostapd/default_hostapd.conf ] && \
         mv /etc/hostapd/hostapd.conf /etc/hostapd/default_hostapd.conf
-    
+
     cat > /etc/hostapd/hostapd.conf <<EOF
-# Router mode conf
 interface=$AP_IFACE
 driver=nl80211
 
@@ -214,7 +219,7 @@ configure_dnsmasq() {
     log "Configuring dnsmasq..."
     [ -f /etc/dnsmasq.conf ] && [ ! -f /etc/default_dnsmasq.conf ] && \
         mv /etc/dnsmasq.conf /etc/default_dnsmasq.conf
-    
+
     mkdir -p /etc/dnsmasq.d
     cat > /etc/dnsmasq.conf <<EOF
 conf-dir=/etc/dnsmasq.d
@@ -263,7 +268,7 @@ configure_iptables() {
 
 configure_persistent() {
     log "Configuring persistent router functionality..."
-    
+
     log "Prevent NetworkManager from managing the interface"
     mkdir -p /etc/NetworkManager/conf.d/
     cat > /etc/NetworkManager/conf.d/${CONF_NAME_FILE}.conf <<EOF
@@ -271,7 +276,7 @@ configure_persistent() {
 unmanaged-devices=interface-name:${AP_IFACE}
 EOF
     systemctl reload NetworkManager || true
-    
+
     log "Creating persistent network configuration..."
     mkdir -p /etc/network/interfaces.d/
     cat > /etc/network/interfaces.d/${CONF_NAME_FILE}.conf <<EOF
@@ -284,10 +289,10 @@ EOF
 
 install_script() {
     log "Installing script to system location..."
-    
+
     cp "$0" "$SCRIPT_INSTALL_PATH"
     chmod +x "$SCRIPT_INSTALL_PATH"
-    
+
     log "Script installed to $SCRIPT_INSTALL_PATH"
 }
 
@@ -333,6 +338,7 @@ start_services() {
 
 create_systemd_service() {
     log "Creating systemd service..."
+
     cat > /etc/systemd/system/router-mode.service <<EOF
 [Unit]
 Description=Router Mode Service
@@ -360,33 +366,33 @@ apply_router_config() {
     if ! detect_interfaces; then
         return 1
     fi
-    
+
     configure_network_interface
     enable_ip_forwarding
     configure_hostapd
     configure_dnsmasq
     configure_iptables
-    
+
     if ! start_services; then
         return 1
     fi
-    
+
     return 0
 }
 
 service_mode_start() {
     log "Router mode service starting..."
-    
+
     if ! load_config; then
         error "No configuration found. Run script interactively first."
         exit 1
     fi
-    
+
     LAN_GW="${LAN_GW:-192.168.50.1}"
     LAN_DHCP_START="${LAN_DHCP_START:-192.168.50.50}"
     LAN_DHCP_END="${LAN_DHCP_END:-192.168.50.150}"
     LAN_DNS="${LAN_DNS:-1.1.1.1,8.8.8.8}"
-    
+
     if apply_router_config; then
         log "Router mode service started successfully"
         exit 0
@@ -405,16 +411,16 @@ service_mode_stop() {
 
 disable_graphical_interface() {
     log "Disabling graphical interface for lower resource usage..."
-    
+
     if systemctl is-active --quiet gdm3 || \
        systemctl is-active --quiet lightdm || \
        systemctl is-active --quiet sddm || \
        systemctl is-active --quiet display-manager; then
-        
+
         systemctl set-default multi-user.target
         log "System will boot to console mode (TTY) on next restart"
         log "Graphical interface disabled to save resources"
-        
+
         return 0
     else
         log "No graphical interface detected, system already in console mode"
@@ -424,10 +430,10 @@ disable_graphical_interface() {
 
 enable_graphical_interface() {
     log "Re-enabling graphical interface..."
-    
+
     systemctl set-default graphical.target
     log "System will boot to graphical mode on next restart"
-    
+
     return 0
 }
 
@@ -456,54 +462,73 @@ interactive_mode() {
         exit 1
     fi
 
-    AP_NAME=""
-    while [ -z "$AP_NAME" ]
-    do
-        read -p "Enter Access Point name (SSID): " AP_NAME
+    CONFIG_VALID=false
+    ENABLE_AT_BOOT="n"
+    DISABLE_GUI="n"
 
-        if [ -z "$AP_NAME" ]; then
-            error "SSID cannot be empty"
+    if load_config && validate_config; then
+        log "Valid configuration found in $CONFIG_FILE"
+        log "AP_NAME: $AP_NAME"
+
+        ENABLE_AT_BOOT="${ENABLE_AT_BOOT:-y}"
+        DISABLE_GUI="${DISABLE_GUI:-n}"
+
+        log "Starting hotspot with existing configuration..."
+        CONFIG_VALID=true
+    else
+        if [ -f "$CONFIG_FILE" ]; then
+            warning "Configuration file found but invalid (missing data)"
+        else
+            warning "No configuration file found"
         fi
-    done
+        log "Requesting information from user..."
 
-    AP_PASSWORD=""
-    while [ -z "$AP_PASSWORD" ]
-    do
-        read -s -p "Enter Access Point password (minimum 8 characters): " AP_PASSWORD
+        AP_NAME=""
+        while [ -z "$AP_NAME" ]; do
+            read -p "Enter Access Point name (SSID): " AP_NAME
+            if [ -z "$AP_NAME" ]; then
+                error "SSID cannot be empty"
+            fi
+        done
+
+        AP_PASSWORD=""
+        while [ -z "$AP_PASSWORD" ] || [ ${#AP_PASSWORD} -lt 8 ]; do
+            read -s -p "Enter Access Point password (minimum 8 characters): " AP_PASSWORD
+            echo
+            if [ -z "$AP_PASSWORD" ]; then
+                error "Password cannot be empty"
+            elif [ ${#AP_PASSWORD} -lt 8 ]; then
+                error "Password must be at least 8 characters long"
+                AP_PASSWORD=""
+            fi
+        done
+
+        echo
+        read -p "Enable router functionality after reboot? (y/N): " ENABLE_AT_BOOT
         echo
 
-        if [ -z "$AP_PASSWORD" ]; then
-            error "Password cannot be empty"
-        elif [ ${#AP_PASSWORD} -lt 8 ]; then
-            error "Password must be at least 8 characters long"
-            AP_PASSWORD=""
+        if [[ ${ENABLE_AT_BOOT^^} == "Y" ]]; then
+            read -p "Disable graphical interface to save resources (boot to TTY)? (y/N): " DISABLE_GUI
+            echo
         fi
-    done
-    echo
-
-    read -p "Enable router functionality after reboot? (y/N): " AP_reboot
-    echo
-
-    DISABLE_GUI=""
-    if [[ ${AP_reboot^^} == "y" ]]; then
-        read -p "Disable graphical interface to save resources (boot to TTY)? (y/N): " DISABLE_GUI
-        echo
     fi
 
     configure_persistent
-    
     install_script
 
     if apply_router_config; then
         save_config
-        
-        if [[ ${AP_reboot^^} == "y" ]]; then
+        log "Configuration saved in $CONFIG_FILE"
+
+        if [ "$CONFIG_VALID" = true ] || [[ ${ENABLE_AT_BOOT^^} == "Y" ]]; then
             create_systemd_service
-            
-            if [[ ${DISABLE_GUI^^} == "y" ]]; then
+
+            if [[ ${DISABLE_GUI^^} == "Y" ]]; then
                 disable_graphical_interface
+            else
+                enable_graphical_interface
             fi
-            
+
             log "Services are enabled for automatic startup via router-mode.service"
             log "Script installed as: $SCRIPT_INSTALL_PATH"
         else
@@ -525,8 +550,11 @@ interactive_mode() {
         echo "LAN Gateway: $LAN_GW"
         echo "DHCP Range: $LAN_DHCP_START - $LAN_DHCP_END"
         echo "DNS Servers: $LAN_DNS"
-        if [[ ${DISABLE_GUI^^} == "y" ]]; then
+        echo "Enable at boot: $ENABLE_AT_BOOT"
+        if [[ ${DISABLE_GUI^^} == "Y" ]]; then
             echo "Boot Mode: Console (TTY) - Graphical interface disabled"
+        else
+            echo "Boot Mode: Graphical interface enabled"
         fi
         echo "================================================"
         echo
@@ -539,8 +567,8 @@ interactive_mode() {
         echo
         log "To manage router mode manually:"
         echo "  sudo $SCRIPT_INSTALL_PATH"
-        
-        if [[ ${DISABLE_GUI^^} == "y" ]]; then
+
+        if [[ ${DISABLE_GUI^^} == "Y" ]]; then
             echo
             warning "System will boot to console mode (TTY) after restart"
             log "To access TTY, use Ctrl+Alt+F1 to F6"
@@ -562,20 +590,31 @@ elif [ "${1:-}" = "--service-stop" ]; then
     exit 0
 fi
 
-read -p "Do you wish to delete the configurations previously made with this script? (y/N): " AP_CLEAN
-if [[ ${AP_CLEAN^^} == "y" ]]; then
-    cleanup_router
+main() {
+    AP_CLEAN=""
+    echo "You have 5 seconds to respond..."
+    echo "Do you wish to delete the configurations previously made with this script? (y/N): "
+    if read -t 5 -p "Do you wish to delete the configurations previously made with this script? (y/N): " AP_CLEAN 2>/dev/null; then
+        if [[ ${AP_CLEAN^^} == "Y" ]]; then
+            cleanup_router
 
-    log "Cleaning complete"
-    warning "A restart is recommended..."
-    read -p "Would you like to restart? (y/N): " AP_RESTART
-    if [[ ${AP_RESTART^^} == "y" ]]; then
-        log "Restarting in 3 seconds..."
-        sleep 3
-        shutdown -r now
+            log "Cleaning complete"
+            warning "A restart is recommended..."
+            read -p "Would you like to restart? (y/N): " AP_RESTART
+            if [[ ${AP_RESTART^^} == "Y" ]]; then
+                log "Restarting in 3 seconds..."
+                sleep 3
+                shutdown -r now
+            fi
+
+            exit 0
+        fi
+    else
+        echo
+        log "Timeout - No cleanup, continuing script..."
     fi
-    
-    exit 0
-fi
 
-interactive_mode
+    interactive_mode
+}
+
+main
