@@ -10,6 +10,8 @@ CONF_NAME_FILE="ROUTER_MODE"
 CONFIG_FILE="/etc/router-mode/config"
 CONFIG_DIR="/etc/router-mode"
 SCRIPT_INSTALL_PATH="/usr/local/sbin/router-mode"
+TECHNITIUM_DNS_SERVICE="dns.service"
+WAN_IFACE_BOOT_WAIT=30
 
 log() { 
     echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" 
@@ -44,8 +46,8 @@ validate_config() {
 }
 
 save_config() {
-    mkdir -p "$CONFIG_DIR"
-    cat > "$CONFIG_FILE" <<EOF
+	mkdir -p "$CONFIG_DIR"
+	cat > "$CONFIG_FILE" <<EOF
 AP_IFACE="$AP_IFACE"
 WAN_IFACE="$WAN_IFACE"
 AP_NAME="$AP_NAME"
@@ -53,11 +55,10 @@ AP_PASSWORD="$AP_PASSWORD"
 LAN_GW="$LAN_GW"
 LAN_DHCP_START="$LAN_DHCP_START"
 LAN_DHCP_END="$LAN_DHCP_END"
-LAN_DNS="$LAN_DNS"
 DISABLE_GUI="$DISABLE_GUI"
 ENABLE_AT_BOOT="$ENABLE_AT_BOOT"
 EOF
-    chmod 600 "$CONFIG_FILE"
+	chmod 600 "$CONFIG_FILE"
 }
 
 cleanup_router() {
@@ -112,37 +113,59 @@ cleanup_router() {
 }
 
 detect_interfaces() {
-    log "Detecting network interfaces..."
-    mapfile -t available_wifi_interfaces < <(nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2=="wifi" {print $1}')
-    mapfile -t source_eth_interfaces < <(nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2=="ethernet" && $3=="connected" {print $1}')
-    supported_wifi_interfaces=()
+	log "Detecting network interfaces..."
+	mapfile -t available_wifi_interfaces < <(nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2=="wifi" {print $1}')
+	supported_wifi_interfaces=()
 
-    for iface in "${available_wifi_interfaces[@]:-}"; do
-        if [ -z "$iface" ]; then continue; fi
+	for iface in "${available_wifi_interfaces[@]:-}"; do
+	if [ -z "$iface" ]; then continue; fi
 
-        phy="phy$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print $2}' || echo "")"
-        if [ -n "$phy" ] && iw "$phy" info 2>/dev/null | grep -q 'AP$'; then
-            supported_wifi_interfaces+=("$iface")
-            log "Found AP-capable interface: $iface"
-        fi
-    done
+	phy="phy$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print $2}' || echo "")"
+	if [ -n "$phy" ] && iw "$phy" info 2>/dev/null | grep -q 'AP$'; then
+		supported_wifi_interfaces+=("$iface")
+		log "Found AP-capable interface: $iface"
+	fi
+	done
 
-    if [ "${#supported_wifi_interfaces[@]}" -eq 0 ]; then
-        error "No Wi-Fi interface supporting AP mode found"
-        return 1
-    fi
+	if [ "${#supported_wifi_interfaces[@]}" -eq 0 ]; then
+		error "No Wi-Fi interface supporting AP mode found"
+		return 1
+	fi
 
-    if [ "${#source_eth_interfaces[@]}" -eq 0 ]; then
-        error "No connected ethernet interface found for internet access"
-        return 1
-    fi
+	AP_IFACE="${supported_wifi_interfaces[0]}"
+	log "Using Wi-Fi interface: $AP_IFACE"
 
-    AP_IFACE="${supported_wifi_interfaces[0]}"
-    WAN_IFACE="${source_eth_interfaces[0]}"
+	if [ -n "${WAN_IFACE:-}" ] && [ "${WAN_IFACE}" != "" ]; then
+		if [ -f "/sys/class/net/${WAN_IFACE}/operstate" ]; then
+			log "Waiting for WAN interface $WAN_IFACE to be connected (max ${WAN_IFACE_BOOT_WAIT}s)..."
+			waited=0
+			while [ "$waited" -lt "$WAN_IFACE_BOOT_WAIT" ]; do
+				wan_state=$(cat /sys/class/net/${WAN_IFACE}/operstate 2>/dev/null || echo "unknown")
+				if [ "$wan_state" = "up" ] || [ "$wan_state" = "unknown" ]; then
+					log "WAN interface $WAN_IFACE is ready ($wan_state)"
+					break
+				fi
+				sleep 1
+				waited=$((waited + 1))
+			done
+			if [ "$waited" -ge "$WAN_IFACE_BOOT_WAIT" ]; then
+				warning "WAN interface $WAN_IFACE did not come up within ${WAN_IFACE_BOOT_WAIT}s, proceeding anyway"
+			fi
+		else
+			warning "Configured WAN interface $WAN_IFACE not found in /sys/class/net/"
+		fi
+		log "Using WAN interface: $WAN_IFACE"
+	else
+		mapfile -t source_eth_interfaces < <(nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2=="ethernet" && $3=="connected" {print $1}')
+		if [ "${#source_eth_interfaces[@]}" -eq 0 ]; then
+			error "No connected ethernet interface found for internet access"
+			return 1
+		fi
+		WAN_IFACE="${source_eth_interfaces[0]}"
+		log "Using WAN interface: $WAN_IFACE"
+	fi
 
-    log "Using Wi-Fi interface: $AP_IFACE"
-    log "Using WAN interface: $WAN_IFACE"
-    return 0
+	return 0
 }
 
 install_packages() {
@@ -225,15 +248,14 @@ configure_dnsmasq() {
 conf-dir=/etc/dnsmasq.d
 EOF
 
-    cat > /etc/dnsmasq.d/router.conf <<EOF
+	cat > /etc/dnsmasq.d/router.conf <<EOF
 interface=$AP_IFACE
 bind-interfaces
 
+port=0
+
 domain-needed
 bogus-priv
-no-resolv
-server=1.1.1.1
-server=8.8.8.8
 
 dhcp-range=$LAN_DHCP_START,$LAN_DHCP_END,255.255.255.0,12h
 dhcp-option=option:router,$LAN_GW
@@ -241,29 +263,33 @@ dhcp-option=option:dns-server,$LAN_GW
 
 log-facility=/var/log/dnsmasq.log
 log-dhcp
-
-cache-size=10000
 EOF
 }
 
 configure_iptables() {
-    log "Configuring iptables..."
-    iptables -F
-    iptables -t nat -F
-    iptables -t mangle -F
-    iptables -X
-    iptables -t nat -X
-    iptables -t mangle -X
+	log "Configuring iptables..."
+	iptables -F
+	iptables -t nat -F
+	iptables -t mangle -F
+	iptables -X
+	iptables -t nat -X
+	iptables -t mangle -X
 
-    iptables -P INPUT ACCEPT
-    iptables -P FORWARD ACCEPT
-    iptables -P OUTPUT ACCEPT
+	iptables -P INPUT ACCEPT
+	iptables -P FORWARD ACCEPT
+	iptables -P OUTPUT ACCEPT
 
-    iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
-    iptables -A FORWARD -i "$AP_IFACE" -o "$WAN_IFACE" -j ACCEPT
-    iptables -A FORWARD -i "$WAN_IFACE" -o "$AP_IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+	iptables -t nat -A PREROUTING -i "$AP_IFACE" -p udp --dport 53 -j DNAT --to-destination "$LAN_GW":53
+	iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport 53 -j DNAT --to-destination "$LAN_GW":53
 
-    netfilter-persistent save
+	iptables -A FORWARD -i "$AP_IFACE" -p udp --dport 53 ! -d "$LAN_GW" -j DROP
+	iptables -A FORWARD -i "$AP_IFACE" -p tcp --dport 53 ! -d "$LAN_GW" -j DROP
+
+	iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
+	iptables -A FORWARD -i "$AP_IFACE" -o "$WAN_IFACE" -j ACCEPT
+	iptables -A FORWARD -i "$WAN_IFACE" -o "$AP_IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+	netfilter-persistent save
 }
 
 configure_persistent() {
@@ -339,11 +365,11 @@ start_services() {
 create_systemd_service() {
     log "Creating systemd service..."
 
-    cat > /etc/systemd/system/router-mode.service <<EOF
+	cat > /etc/systemd/system/router-mode.service <<EOF
 [Unit]
 Description=Router Mode Service
-After=network.target NetworkManager.service
-Wants=network.target
+After=network.target NetworkManager.service NetworkManager-wait-online.service dns.service
+Wants=network.target NetworkManager-wait-online.service dns.service
 
 [Service]
 Type=oneshot
@@ -363,37 +389,56 @@ EOF
 }
 
 apply_router_config() {
-    if ! detect_interfaces; then
-        return 1
-    fi
+	if ! detect_interfaces; then
+		return 1
+	fi
 
-    configure_network_interface
-    enable_ip_forwarding
-    configure_hostapd
-    configure_dnsmasq
-    configure_iptables
+	if systemctl is-active --quiet systemd-resolved; then
+		warning "systemd-resolved is running and may conflict with Technitium DNS on port 53"
+		log "Stopping systemd-resolved..."
+		systemctl stop systemd-resolved 2>/dev/null || true
+		systemctl disable systemd-resolved 2>/dev/null || true
+		if [ -L /etc/resolv.conf ]; then
+			rm -f /etc/resolv.conf
+			echo "nameserver 127.0.0.1" > /etc/resolv.conf
+		fi
+	fi
 
-    if ! start_services; then
-        return 1
-    fi
+	configure_network_interface
+	enable_ip_forwarding
+	configure_hostapd
+	configure_dnsmasq
+	configure_iptables
 
-    return 0
+	if ! start_services; then
+		return 1
+	fi
+
+	return 0
 }
 
 service_mode_start() {
-    log "Router mode service starting..."
+	log "Router mode service starting..."
 
-    if ! load_config; then
-        error "No configuration found. Run script interactively first."
-        exit 1
-    fi
+	if ! load_config; then
+		error "No configuration found. Run script interactively first."
+		exit 1
+	fi
 
-    LAN_GW="${LAN_GW:-192.168.50.1}"
-    LAN_DHCP_START="${LAN_DHCP_START:-192.168.50.50}"
-    LAN_DHCP_END="${LAN_DHCP_END:-192.168.50.150}"
-    LAN_DNS="${LAN_DNS:-1.1.1.1,8.8.8.8}"
+	LAN_GW="${LAN_GW:-192.168.50.1}"
+	LAN_DHCP_START="${LAN_DHCP_START:-192.168.50.50}"
+	LAN_DHCP_END="${LAN_DHCP_END:-192.168.50.150}"
 
-    if apply_router_config; then
+	if ! systemctl is-active --quiet "$TECHNITIUM_DNS_SERVICE"; then
+		warning "Technitium DNS service is not running, attempting to start..."
+		if systemctl start "$TECHNITIUM_DNS_SERVICE"; then
+			log "Technitium DNS started successfully"
+		else
+			error "Failed to start Technitium DNS - DNS resolution for clients will not work"
+		fi
+	fi
+
+	if apply_router_config; then
         log "Router mode service started successfully"
         exit 0
     else
@@ -438,10 +483,9 @@ enable_graphical_interface() {
 }
 
 interactive_mode() {
-    LAN_GW="192.168.50.1"
-    LAN_DHCP_START="192.168.50.50"
-    LAN_DHCP_END="192.168.50.150"
-    LAN_DNS="1.1.1.1,8.8.8.8"
+	LAN_GW="192.168.50.1"
+	LAN_DHCP_START="192.168.50.50"
+	LAN_DHCP_END="192.168.50.150"
 
     cleanup() {
         warning "Cleaning up..."
@@ -547,10 +591,10 @@ interactive_mode() {
         echo "Password: $AP_PASSWORD"
         echo "Interface: $AP_IFACE"
         echo "Internet via: $WAN_IFACE"
-        echo "LAN Gateway: $LAN_GW"
-        echo "DHCP Range: $LAN_DHCP_START - $LAN_DHCP_END"
-        echo "DNS Servers: $LAN_DNS"
-        echo "Enable at boot: $ENABLE_AT_BOOT"
+	echo "LAN Gateway: $LAN_GW"
+	echo "DHCP Range: $LAN_DHCP_START - $LAN_DHCP_END"
+	echo "DNS: Technitium DNS ($LAN_GW:53)"
+	echo "Enable at boot: $ENABLE_AT_BOOT"
         if [[ ${DISABLE_GUI^^} == "Y" ]]; then
             echo "Boot Mode: Console (TTY) - Graphical interface disabled"
         else
