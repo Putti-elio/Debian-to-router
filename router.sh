@@ -20,6 +20,10 @@ LAN_SUBNET="24"
 LAN_DHCP_START="192.168.50.50"
 LAN_DHCP_END="192.168.50.150"
 
+WIFI_HIGH_CHANNEL_COUNTRY="BO"
+WIFI_CHANNEL14_COUNTRY="JP"
+WIFI_COUNTRY_CODE="CA"
+
 SYSCTL_DROPIN="/etc/sysctl.d/99-router-ipforward.conf"
 ROUTER_CHAIN="ROUTER_FORWARD"
 PROJECT_LOG_DIR="/home/routeur/Debian-to-router"
@@ -134,6 +138,7 @@ LAN_DHCP_START="$(escape_shell_value "$LAN_DHCP_START")"
 LAN_DHCP_END="$(escape_shell_value "$LAN_DHCP_END")"
 WIFI_BAND="$(escape_shell_value "$WIFI_BAND")"
 WIFI_CHANNEL="$(escape_shell_value "$WIFI_CHANNEL")"
+WIFI_COUNTRY_CODE="$(escape_shell_value "$WIFI_COUNTRY_CODE")"
 DISABLE_GUI="$(escape_shell_value "$DISABLE_GUI")"
 ENABLE_AT_BOOT="$(escape_shell_value "$ENABLE_AT_BOOT")"
 EOF
@@ -178,6 +183,10 @@ cleanup_router() {
     fi
     sysctl -w net.ipv4.ip_forward=0 >/dev/null 2>&1 || true
     sysctl --system >/dev/null 2>&1 || true
+    iw reg 00 2>/dev/null || true
+    if [ -f /etc/default/crda ]; then
+        sed -i "s/^REGDOMAIN=.*/REGDOMAIN=00/" /etc/default/crda 2>/dev/null || true
+    fi
 
     log "Flushing iptables router rules..."
     iptables -F "$ROUTER_CHAIN" 2>/dev/null || true
@@ -204,31 +213,131 @@ cleanup_router() {
     enable_graphical_interface
 }
 
-detect_interfaces() {
-    log "Detecting network interfaces..."
-
+list_wifi_interfaces() {
     mapfile -t available_wifi_interfaces < <(
         nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2=="wifi" {print $1}'
     )
-    local supported_wifi_interfaces=()
 
+    SUPPORTED_WIFI_INTERFACES=()
     for iface in "${available_wifi_interfaces[@]:-}"; do
         [ -z "$iface" ] && continue
         local phy
         phy="phy$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print $2}' || echo "")"
         if [ -n "$phy" ] && iw "$phy" info 2>/dev/null | grep -q 'AP$'; then
-            supported_wifi_interfaces+=("$iface")
-            log "Found AP-capable interface: $iface"
+            SUPPORTED_WIFI_INTERFACES+=("$iface")
         fi
     done
 
-    if [ "${#supported_wifi_interfaces[@]}" -eq 0 ]; then
+    if [ "${#SUPPORTED_WIFI_INTERFACES[@]}" -eq 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+describe_wifi_interface() {
+    local iface="$1"
+    local state
+    if [ -f "/sys/class/net/${iface}/operstate" ]; then
+        state=$(cat "/sys/class/net/${iface}/operstate" 2>/dev/null || echo "unknown")
+    else
+        state="missing"
+    fi
+    local mac
+    mac=$(cat "/sys/class/net/${iface}/address" 2>/dev/null || echo "??:??:??:??:??:??")
+    local bands=""
+    local phy
+    phy="phy$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print $2}' || echo "")"
+    if [ -n "$phy" ]; then
+        if iw "$phy" info 2>/dev/null | grep -q "2412 MHz"; then bands="${bands}2.4G "; fi
+        if iw "$phy" info 2>/dev/null | grep -q "5180 MHz"; then bands="${bands}5G "; fi
+    fi
+    [ -z "$bands" ] && bands="?"
+    echo "${iface} | state=${state} | mac=${mac} | bands=${bands}"
+}
+
+select_wifi_interface() {
+    if ! list_wifi_interfaces; then
         error "No Wi-Fi interface supporting AP mode found"
         return 1
     fi
 
-    AP_IFACE="${supported_wifi_interfaces[0]}"
-    log "Using Wi-Fi interface: $AP_IFACE"
+    local count="${#SUPPORTED_WIFI_INTERFACES[@]}"
+    log "Available Wi-Fi interfaces (AP-capable):"
+    local i=1
+    for iface in "${SUPPORTED_WIFI_INTERFACES[@]}"; do
+        echo "  ${i}) $(describe_wifi_interface "$iface")"
+        i=$((i + 1))
+    done
+
+    local default_choice=""
+    if [ -n "${AP_IFACE:-}" ]; then
+        local k=1
+        for iface in "${SUPPORTED_WIFI_INTERFACES[@]}"; do
+            if [ "$iface" = "$AP_IFACE" ]; then
+                default_choice="$k"
+                break
+            fi
+            k=$((k + 1))
+        done
+    fi
+
+    local prompt
+    if [ -n "$default_choice" ]; then
+        prompt="Select Wi-Fi interface for the access point [${default_choice}]: "
+    else
+        prompt="Select Wi-Fi interface for the access point (1-${count}, q to quit): "
+    fi
+
+    local choice=""
+    while true; do
+        read -r -p "$prompt" choice
+        if [ -z "$choice" ] && [ -n "$default_choice" ]; then
+            choice="$default_choice"
+        fi
+        if [[ ${choice,,} == "q" ]]; then
+            error "Aborted by user"
+            return 1
+        fi
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+            break
+        fi
+        warning "Invalid selection: '$choice' (expected 1-${count})"
+    done
+
+    AP_IFACE="${SUPPORTED_WIFI_INTERFACES[$((choice - 1))]}"
+    log "Selected Wi-Fi interface: $AP_IFACE"
+
+    if [ -f "/sys/class/net/${AP_IFACE}/operstate" ]; then
+        local current_state
+        current_state=$(cat "/sys/class/net/${AP_IFACE}/operstate" 2>/dev/null || echo "unknown")
+        if [ "$current_state" != "up" ]; then
+            warning "Interface ${AP_IFACE} is ${current_state} — hostapd/dnsmasq will manage it anyway"
+            read -r -p "Continue with ${AP_IFACE} as AP? (Y/n): " confirm
+            if [[ ${confirm,,} == "n" ]]; then
+                error "User cancelled on DOWN interface"
+                return 1
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+detect_interfaces() {
+    log "Detecting network interfaces..."
+
+    if ! list_wifi_interfaces; then
+        error "No Wi-Fi interface supporting AP mode found"
+        return 1
+    fi
+
+    if [ -z "${AP_IFACE:-}" ] || ! printf '%s\n' "${SUPPORTED_WIFI_INTERFACES[@]}" | grep -qx "${AP_IFACE}"; then
+        log "Found ${#SUPPORTED_WIFI_INTERFACES[@]} AP-capable Wi-Fi interface(s): ${SUPPORTED_WIFI_INTERFACES[*]}"
+        AP_IFACE="${SUPPORTED_WIFI_INTERFACES[0]}"
+        log "Default Wi-Fi interface: $AP_IFACE"
+    else
+        log "Using configured Wi-Fi interface: $AP_IFACE"
+    fi
 
     if [ -n "${WAN_IFACE:-}" ] && [ "${WAN_IFACE}" != "" ]; then
         if [ -f "/sys/class/net/${WAN_IFACE}/operstate" ]; then
@@ -372,18 +481,43 @@ EOF
     sysctl --system >/dev/null
 }
 
+apply_regulatory_domain() {
+    local country="${WIFI_COUNTRY_CODE:-CA}"
+    if [ "${WIFI_BAND}" != "2.4" ]; then
+        return 0
+    fi
+    if ! command -v iw >/dev/null 2>&1; then
+        return 0
+    fi
+    case "$country" in
+        00|"") country="CA" ;;
+    esac
+
+    iw reg "$country" 2>/dev/null || warning "iw reg $country failed (driver may ignore)"
+
+    if [ -f /etc/default/crda ] || [ -w /etc/default/ ]; then
+        if [ -f /etc/default/crda ] && grep -qE '^REGDOMAIN=' /etc/default/crda; then
+            sed -i "s/^REGDOMAIN=.*/REGDOMAIN=$country/" /etc/default/crda
+        else
+            echo "REGDOMAIN=$country" > /etc/default/crda
+        fi
+        log "Persistent REGDOMAIN=$country written to /etc/default/crda"
+    fi
+}
+
 configure_hostapd() {
     log "Configuring hostapd..."
     [ -f /etc/hostapd/hostapd.conf ] && [ ! -f /etc/hostapd/default_hostapd.conf ] && \
         mv /etc/hostapd/hostapd.conf /etc/hostapd/default_hostapd.conf
 
     local channel="${WIFI_CHANNEL:-1}"
+    local country="${WIFI_COUNTRY_CODE:-CA}"
 
     if [ "${WIFI_BAND}" = "5" ]; then
         cat > /etc/hostapd/hostapd.conf <<EOF
 interface=$AP_IFACE
 driver=nl80211
-country_code=CA
+country_code=$country
 ieee80211d=1
 
 ssid=$AP_NAME
@@ -409,7 +543,7 @@ EOF
         cat > /etc/hostapd/hostapd.conf <<EOF
 interface=$AP_IFACE
 driver=nl80211
-country_code=CA
+country_code=$country
 ieee80211d=1
 
 ssid=$AP_NAME
@@ -603,6 +737,7 @@ apply_router_config() {
     stop_systemd_resolved
     configure_network_interface
     iw dev "$AP_IFACE" set power_save off 2>/dev/null || true
+    apply_regulatory_domain
     enable_ip_forwarding
     configure_hostapd
     configure_dnsmasq
@@ -628,6 +763,12 @@ service_mode_start() {
     LAN_DHCP_END="${LAN_DHCP_END:-192.168.50.150}"
     WIFI_BAND="${WIFI_BAND:-2.4}"
     WIFI_CHANNEL="${WIFI_CHANNEL:-1}"
+    WIFI_COUNTRY_CODE="${WIFI_COUNTRY_CODE:-CA}"
+
+    if [ "${WIFI_BAND}" = "2.4" ] && [ "${WIFI_COUNTRY_CODE}" != "CA" ]; then
+        iw reg "$WIFI_COUNTRY_CODE" 2>/dev/null || true
+        log "Applied regulatory domain $WIFI_COUNTRY_CODE on boot for AP $AP_IFACE"
+    fi
 
     install_technitium || warning "Technitium DNS install failed, DNS may not work"
 
@@ -677,29 +818,128 @@ enable_graphical_interface() {
 
 pick_wifi_channel() {
     log "Scanning for best Wi-Fi channel..."
+    rfkill unblock wifi 2>/dev/null || true
+    ip link set "$AP_IFACE" up 2>/dev/null || true
+
     local scan_output
     scan_output=$(iw dev "$AP_IFACE" scan 2>/dev/null || true)
 
-    local ch1_count=0 ch6_count=0 ch11_count=0
+    local ch1_count=0 ch6_count=0 ch11_count=0 ch13_count=0
     ch1_count=$(echo "$scan_output" | grep -c "freq: 2412" || true)
     ch6_count=$(echo "$scan_output" | grep -c "freq: 2437" || true)
     ch11_count=$(echo "$scan_output" | grep -c "freq: 2462" || true)
+    ch13_count=$(echo "$scan_output" | grep -c "freq: 2472" || true)
+
+    local phy
+    phy="phy$(iw dev "$AP_IFACE" info 2>/dev/null | awk '/wiphy/ {print $2}' || echo "")"
+    local allowed_channels=""
+    if [ -n "$phy" ]; then
+        allowed_channels=$(iw "$phy" info 2>/dev/null | awk '/\* 24[0-9][0-9][[:space:]]*MHz/ {print $1}' | tr '\n' ' ')
+    fi
+
+    log "Allowed 2.4GHz channels for current regulatory domain: ${allowed_channels:-unknown}"
+
+    echo
+    echo "Channel selection:"
+    echo "  1) Auto: pick least congested among 1/6/11"
+    echo "  2) Force channel 13 (needs regulatory country with ch13: BO)"
+    echo "  3) Force channel 14 SOLO (needs regulatory country JP, only legal in Japan; hostapd accepts it)"
+    echo "  4) Pick least congested among 1/6/11/13 (needs regulatory country with ch13)"
+    echo "  5) Manual channel selection (1-14)"
+    echo
+    local high_choice=""
+    while [[ ! "$high_choice" =~ ^[1-5]$ ]]; do
+        read -p "Choice [1-5] (default 1): " high_choice
+        [ -z "$high_choice" ] && high_choice="1"
+    done
 
     local best_channel=1
     local best_count=$ch1_count
 
-    if [ "$ch6_count" -lt "$best_count" ]; then
-        best_channel=6
-        best_count=$ch6_count
-    fi
-    if [ "$ch11_count" -lt "$best_count" ]; then
-        best_channel=11
-        best_count=$ch11_count
-    fi
+    case "$high_choice" in
+        1)
+            log "Auto-selecting (channels 1/6/11)"
+            best_count=$ch1_count
+            if [ "$ch6_count" -lt "$best_count" ]; then
+                best_channel=6
+                best_count=$ch6_count
+            fi
+            if [ "$ch11_count" -lt "$best_count" ]; then
+                best_channel=11
+                best_count=$ch11_count
+            fi
+            log "Channel usage: Ch1=$ch1_count Ch6=$ch6_count Ch11=$ch11_count"
+            ;;
+        2)
+            if ! echo " ${allowed_channels} " | grep -q " 2472 "; then
+                warning "Channel 13 not currently allowed by regulatory domain."
+                warning "Setting country ${WIFI_HIGH_CHANNEL_COUNTRY} for ch13."
+            fi
+            WIFI_COUNTRY_CODE="$WIFI_HIGH_CHANNEL_COUNTRY"
+            iw reg "$WIFI_COUNTRY_CODE" 2>/dev/null || true
+            best_channel=13
+            ;;
+        3)
+            log "Forcing channel 14 in SOLO mode (country ${WIFI_CHANNEL14_COUNTRY})"
+            WIFI_COUNTRY_CODE="$WIFI_CHANNEL14_COUNTRY"
+            iw reg "$WIFI_COUNTRY_CODE" 2>/dev/null || true
+            best_channel=14
+            ;;
+        4)
+            if ! echo " ${allowed_channels} " | grep -q " 2472 "; then
+                warning "Channel 13 not currently allowed. Setting country ${WIFI_HIGH_CHANNEL_COUNTRY}."
+            fi
+            WIFI_COUNTRY_CODE="$WIFI_HIGH_CHANNEL_COUNTRY"
+            iw reg "$WIFI_COUNTRY_CODE" 2>/dev/null || true
+            log "Auto-selecting (channels 1/6/11/13)"
+            best_count=$ch1_count
+            if [ "$ch6_count" -lt "$best_count" ]; then
+                best_channel=6
+                best_count=$ch6_count
+            fi
+            if [ "$ch11_count" -lt "$best_count" ]; then
+                best_channel=11
+                best_count=$ch11_count
+            fi
+            if [ "$ch13_count" -lt "$best_count" ]; then
+                best_channel=13
+                best_count=$ch13_count
+            fi
+            log "Channel usage: Ch1=$ch1_count Ch6=$ch6_count Ch11=$ch11_count Ch13=$ch13_count"
+            ;;
+        5)
+            log "Manual channel selection."
+            log "Currently allowed 2.4GHz channels: ${allowed_channels:-unknown}"
+            local manual_ch=""
+            while [[ ! "$manual_ch" =~ ^(1[0-4]|[1-9])$ ]]; do
+                read -p "Enter channel number (1-14): " manual_ch
+            done
+            case "$manual_ch" in
+                13)
+                    if ! echo " ${allowed_channels} " | grep -q " 2472 "; then
+                        warning "Channel 13 not allowed. Setting country ${WIFI_HIGH_CHANNEL_COUNTRY}."
+                    fi
+                    WIFI_COUNTRY_CODE="$WIFI_HIGH_CHANNEL_COUNTRY"
+                    iw reg "$WIFI_COUNTRY_CODE" 2>/dev/null || true
+                    ;;
+                14)
+                    log "Channel 14 selected (country ${WIFI_CHANNEL14_COUNTRY})."
+                    WIFI_COUNTRY_CODE="$WIFI_CHANNEL14_COUNTRY"
+                    iw reg "$WIFI_COUNTRY_CODE" 2>/dev/null || true
+                    ;;
+                *)
+                    if ! echo " ${allowed_channels} " | grep -q " 24${manual_ch}2 " && [ "$manual_ch" != "1" ] && [ "$manual_ch" != "2" ]; then
+                        warning "Channel ${manual_ch} may be outside the regulatory allowed set; trying anyway."
+                    fi
+                    ;;
+            esac
+            best_channel="$manual_ch"
+            log "Manual channel selected: $best_channel (country=${WIFI_COUNTRY_CODE})"
+            ;;
+    esac
 
-    log "Channel usage: Ch1=$ch1_count Ch6=$ch6_count Ch11=$ch11_count"
-    log "Auto-selected channel $best_channel (least congested)"
     WIFI_CHANNEL="$best_channel"
+    log "Using channel $best_channel (country=${WIFI_COUNTRY_CODE})"
 }
 
 interactive_mode() {
@@ -713,6 +953,12 @@ interactive_mode() {
 
     if ! detect_interfaces; then
         exit 1
+    fi
+
+    if [ "${#SUPPORTED_WIFI_INTERFACES[@]}" -gt 1 ] || [ -z "${AP_IFACE:-}" ]; then
+        if ! select_wifi_interface; then
+            exit 1
+        fi
     fi
 
     CONFIG_VALID=false

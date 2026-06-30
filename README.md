@@ -43,10 +43,12 @@ sudo ./router.sh
 
 The script will prompt you for:
 
-1. **Wi-Fi network name (SSID)**: Your access point name
-2. **Password**: Minimum 8 characters, WPA2-PSK encryption
-3. **Persistent mode**: Enable automatic startup on boot
-4. **TTY mode** (if persistent): Disable graphical interface to save resources
+1. **Wi-Fi interface selection**: A numbered menu lists all AP-capable Wi-Fi interfaces (e.g. `wlan0` internal, `wlan1` USB). Pick the one you want to use as the access point.
+2. **Wi-Fi network name (SSID)**: Your access point name
+3. **Password**: Minimum 8 characters, WPA2-PSK encryption
+4. **Persistent mode**: Enable automatic startup on boot
+5. **TTY mode** (if persistent): Disable graphical interface to save resources
+6. **Channel 13 (optional)**: If your regulatory domain allows channel 2472 MHz, you can opt into selecting channel 13 for a less crowded slice of the band. The script switches the country code to a domain (default: BO) and persists `REGDOMAIN` in `/etc/default/crda`.
 
 Technitium DNS is installed automatically if not present. If it's already installed, the script just ensures it's running.
 
@@ -175,6 +177,9 @@ The script is optimized for 2.4GHz operation:
 
 - **20 MHz channel width**: Uses only `ht_capab=[SHORT-GI-20][MAX-AMSDU-7935]` — no HT40. 40 MHz on 2.4GHz wastes 2/3 of the band and causes interference with neighboring networks.
 - **Non-overlapping channels only**: Automatically scans and selects from channels 1, 6, or 11 (the only non-overlapping 2.4GHz channels).
+- **Optional channel 13**: If your wireless hardware + driver exposes channel 2472 MHz, a prompt lets you include channel 13 when picking the least congested channel. The country code is set to `BO` (Bolivie, authorized for ch13 in 2.4 GHz) and `REGDOMAIN` is persisted to `/etc/default/crda` so boot survives.
+- **SOLO channel 14 mode**: A prompt offers a mode that locks the AP to channel 14 (2484 MHz). This is the channel authorized only in Japan (regulatory code `JP`). Using it outside Japan may violate local regulations — use at your own discretion. The script switches `country_code=JP` in hostapd and persists `REGDOMAIN=JP` to `/etc/default/crda`.
+- **Manual channel selection**: A 5th option lets you type a specific channel number (1-14). The script automatically picks the right regulatory country for the chosen channel (`CA` for 1-12, `BO` for 13, `JP` for 14) and warns if the channel is outside the current regulatory allowed set.
 - **Power save disabled**: Wi-Fi power save is turned off on the AP interface for stability.
 
 ## TTY Mode (Console Only)
