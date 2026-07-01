@@ -12,6 +12,8 @@ CONFIG_DIR="/etc/router-mode"
 SCRIPT_INSTALL_PATH="/usr/local/sbin/router-mode"
 TECHNITIUM_DNS_SERVICE="dns.service"
 TECHNITIUM_INSTALL_DIR="/opt/technitium/dns"
+TECHNITIUM_INSTALL_SCRIPT_URL="https://download.technitium.com/dns/install.sh"
+TECHNITIUM_UPDATE_SCRIPT_URL="https://download.technitium.com/dns/update.sh"
 WAN_IFACE_BOOT_WAIT=30
 WIFI_BAND="2.4"
 WIFI_CHANNEL="1"
@@ -28,6 +30,9 @@ SYSCTL_DROPIN="/etc/sysctl.d/99-router-ipforward.conf"
 ROUTER_CHAIN="ROUTER_FORWARD"
 PROJECT_LOG_DIR="/home/routeur/Debian-to-router"
 LEGACY_LOG_FILE="/var/log/router-mode.log"
+RESOLV_CONF_BACKUP="${CONFIG_DIR}/resolv.conf.backup"
+SYSTEMD_RESOLVED_STATE_FILE="${CONFIG_DIR}/systemd-resolved.state"
+SYSTEMD_RESOLVED_ACTIVE_FILE="${CONFIG_DIR}/systemd-resolved.active"
 LOG_FILE=""
 
 init_logging() {
@@ -40,8 +45,6 @@ init_logging() {
     if [ "$LOG_FILE" != "$LEGACY_LOG_FILE" ] && [ -f "$LEGACY_LOG_FILE" ]; then
         rm -f "$LEGACY_LOG_FILE" 2>/dev/null || true
     fi
-
-    rm -f "$LOG_FILE" 2>/dev/null || true
 }
 
 _log_to_file() {
@@ -90,11 +93,177 @@ escape_shell_value() {
 }
 
 load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        return 0
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return 1
     fi
-    return 1
+
+    local line key raw_value value
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        if [[ "$line" != *=* ]]; then
+            error "Invalid config line in $CONFIG_FILE: $line"
+            return 1
+        fi
+
+        key=${line%%=*}
+        raw_value=${line#*=}
+
+        case "$key" in
+            AP_IFACE|WAN_IFACE|AP_NAME|AP_PASSWORD|LAN_GW|LAN_DHCP_START|LAN_DHCP_END|WIFI_BAND|WIFI_CHANNEL|WIFI_COUNTRY_CODE|DISABLE_GUI|ENABLE_AT_BOOT)
+                ;;
+            *)
+                error "Invalid config key in $CONFIG_FILE: $key"
+                return 1
+                ;;
+        esac
+
+        if [[ "$raw_value" != '"'*'"' ]]; then
+            error "Invalid config value format for $key in $CONFIG_FILE"
+            return 1
+        fi
+
+        value=${raw_value:1:-1}
+        value=${value//\\\\/\\}
+        value=${value//\\\"/\"}
+        value=${value//\\\$/\$}
+        value=${value//\\\`/\`}
+
+        printf -v "$key" "%s" "$value"
+    done < "$CONFIG_FILE"
+
+    return 0
+}
+
+channel_to_frequency() {
+    local channel="$1"
+    case "$channel" in
+        14)
+            printf '2484'
+            ;;
+        [1-9]|1[0-3])
+            printf '%s' $((2407 + 5 * channel))
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+backup_runtime_state() {
+    mkdir -p "$CONFIG_DIR"
+
+    if [ ! -e "$RESOLV_CONF_BACKUP" ] && { [ -e /etc/resolv.conf ] || [ -L /etc/resolv.conf ]; }; then
+        cp -a /etc/resolv.conf "$RESOLV_CONF_BACKUP" 2>/dev/null || true
+    fi
+
+    if systemctl list-unit-files systemd-resolved >/dev/null 2>&1; then
+        local resolved_state="unknown"
+        resolved_state=$(systemctl is-enabled systemd-resolved 2>/dev/null || printf 'unknown')
+        if [ -n "$resolved_state" ]; then
+            printf '%s\n' "$resolved_state" > "$SYSTEMD_RESOLVED_STATE_FILE"
+        else
+            printf 'unknown\n' > "$SYSTEMD_RESOLVED_STATE_FILE"
+        fi
+
+        if systemctl is-active --quiet systemd-resolved; then
+            printf 'yes\n' > "$SYSTEMD_RESOLVED_ACTIVE_FILE"
+        else
+            printf 'no\n' > "$SYSTEMD_RESOLVED_ACTIVE_FILE"
+        fi
+    fi
+}
+
+restore_runtime_state() {
+    if [ -e "$RESOLV_CONF_BACKUP" ] || [ -L "$RESOLV_CONF_BACKUP" ]; then
+        rm -f /etc/resolv.conf
+        cp -a "$RESOLV_CONF_BACKUP" /etc/resolv.conf 2>/dev/null || true
+        rm -f "$RESOLV_CONF_BACKUP"
+    fi
+
+    if systemctl list-unit-files systemd-resolved >/dev/null 2>&1; then
+        local resolved_state="unknown"
+        local resolved_was_active="no"
+
+        if [ -f "$SYSTEMD_RESOLVED_STATE_FILE" ]; then
+            resolved_state=$(cat "$SYSTEMD_RESOLVED_STATE_FILE" 2>/dev/null || printf 'unknown')
+        fi
+        if [ -f "$SYSTEMD_RESOLVED_ACTIVE_FILE" ]; then
+            resolved_was_active=$(cat "$SYSTEMD_RESOLVED_ACTIVE_FILE" 2>/dev/null || printf 'no')
+        fi
+
+        case "$resolved_state" in
+            enabled|enabled-runtime|linked|linked-runtime)
+                systemctl enable systemd-resolved 2>/dev/null || true
+                ;;
+            disabled)
+                systemctl disable systemd-resolved 2>/dev/null || true
+                ;;
+            masked)
+                systemctl mask systemd-resolved 2>/dev/null || true
+                ;;
+        esac
+
+        if [ "$resolved_was_active" = "yes" ]; then
+            systemctl start systemd-resolved 2>/dev/null || true
+        else
+            systemctl stop systemd-resolved 2>/dev/null || true
+        fi
+    fi
+
+    rm -f "$SYSTEMD_RESOLVED_STATE_FILE" "$SYSTEMD_RESOLVED_ACTIVE_FILE"
+}
+
+remove_router_iptables() {
+    local wan_iface="${1:-${WAN_IFACE:-}}"
+
+    while iptables -D FORWARD -j "$ROUTER_CHAIN" 2>/dev/null; do :; done
+    iptables -F "$ROUTER_CHAIN" 2>/dev/null || true
+    iptables -X "$ROUTER_CHAIN" 2>/dev/null || true
+
+    while iptables -t nat -D PREROUTING -j "$ROUTER_CHAIN" 2>/dev/null; do :; done
+    if [ -n "$wan_iface" ]; then
+        while iptables -t nat -D POSTROUTING -o "$wan_iface" -j MASQUERADE 2>/dev/null; do :; done
+    fi
+    iptables -t nat -F "$ROUTER_CHAIN" 2>/dev/null || true
+    iptables -t nat -X "$ROUTER_CHAIN" 2>/dev/null || true
+
+    iptables -t mangle -F "$ROUTER_CHAIN" 2>/dev/null || true
+    iptables -t mangle -X "$ROUTER_CHAIN" 2>/dev/null || true
+}
+
+teardown_runtime_router_state() {
+    if [ -n "${AP_IFACE:-}" ]; then
+        ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+        ip link set "$AP_IFACE" down 2>/dev/null || true
+        nmcli dev set "$AP_IFACE" managed yes 2>/dev/null || true
+    fi
+
+    remove_router_iptables "${WAN_IFACE:-}"
+
+    sysctl -w net.ipv4.ip_forward=0 >/dev/null 2>&1 || true
+
+    restore_runtime_state
+}
+
+download_technitium_script() {
+    local url="$1"
+    local script_path="$2"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl --fail --silent --show-error --location "$url" -o "$script_path"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$script_path" "$url"
+    else
+        apt-get install -y curl
+        curl --fail --silent --show-error --location "$url" -o "$script_path"
+    fi
+
+    if ! head -n 1 "$script_path" | grep -q '^#!'; then
+        error "Downloaded Technitium script is not executable shell content"
+        return 1
+    fi
+
+    chmod 700 "$script_path"
 }
 
 validate_config() {
@@ -146,6 +315,8 @@ EOF
 }
 
 cleanup_router() {
+    load_config >/dev/null 2>&1 || true
+
     log "Stopping and disabling router services..."
     systemctl disable --quiet router-mode.service 2>/dev/null || true
     systemctl stop --quiet router-mode.service 2>/dev/null || true
@@ -171,7 +342,6 @@ cleanup_router() {
     rm -f /etc/default/hostapd
     rm -f "$SYSCTL_DROPIN"
     rm -f /etc/systemd/system/router-mode.service
-    rm -rf "$CONFIG_DIR"
     rm -f "$SCRIPT_INSTALL_PATH"
 
     [ -f /etc/hostapd/default_hostapd.conf ] && mv /etc/hostapd/default_hostapd.conf /etc/hostapd/hostapd.conf
@@ -189,19 +359,7 @@ cleanup_router() {
     fi
 
     log "Flushing iptables router rules..."
-    iptables -F "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -D FORWARD -j "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -X "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t nat -F "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t nat -D PREROUTING -j "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t nat -X "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -j "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t mangle -F "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t mangle -X "$ROUTER_CHAIN" 2>/dev/null || true
-
-    iptables -P INPUT ACCEPT 2>/dev/null || true
-    iptables -P FORWARD ACCEPT 2>/dev/null || true
-    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+    remove_router_iptables "${WAN_IFACE:-}"
 
     netfilter-persistent save 2>/dev/null || true
 
@@ -209,6 +367,9 @@ cleanup_router() {
 
     log "Restarting NetworkManager..."
     systemctl restart NetworkManager || true
+
+    restore_runtime_state
+    rm -rf "$CONFIG_DIR"
 
     enable_graphical_interface
 }
@@ -409,16 +570,19 @@ install_technitium() {
     fi
 
     log "Technitium DNS not found. Installing..."
-    warning "This will download and install Technitium DNS from download.technitium.com"
+    warning "This downloads and runs the official Technitium installer from download.technitium.com"
 
-    if command -v curl &>/dev/null; then
-        curl -sSL https://download.technitium.com/dns/install.sh | bash
-    elif command -v wget &>/dev/null; then
-        wget -qO- https://download.technitium.com/dns/install.sh | bash
-    else
-        apt-get install -y curl
-        curl -sSL https://download.technitium.com/dns/install.sh | bash
+    local installer
+    installer=$(mktemp /tmp/technitium-install.XXXXXX)
+    if ! download_technitium_script "$TECHNITIUM_INSTALL_SCRIPT_URL" "$installer"; then
+        rm -f "$installer"
+        return 1
     fi
+    if ! bash "$installer"; then
+        rm -f "$installer"
+        return 1
+    fi
+    rm -f "$installer"
 
     if systemctl list-unit-files "$TECHNITIUM_DNS_SERVICE" &>/dev/null; then
         log "Technitium DNS installed successfully"
@@ -437,11 +601,17 @@ update_technitium() {
     fi
 
     log "Checking for Technitium DNS update..."
-    if command -v curl &>/dev/null; then
-        curl -sSL https://download.technitium.com/dns/update.sh | bash
-    else
-        wget -qO- https://download.technitium.com/dns/update.sh | bash
+    local updater
+    updater=$(mktemp /tmp/technitium-update.XXXXXX)
+    if ! download_technitium_script "$TECHNITIUM_UPDATE_SCRIPT_URL" "$updater"; then
+        rm -f "$updater"
+        return 1
     fi
+    if ! bash "$updater"; then
+        rm -f "$updater"
+        return 1
+    fi
+    rm -f "$updater"
     log "Technitium DNS update completed"
 }
 
@@ -601,14 +771,7 @@ EOF
 configure_iptables() {
     log "Configuring iptables (using dedicated chain $ROUTER_CHAIN)..."
 
-    iptables -F "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -D FORWARD -j "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -X "$ROUTER_CHAIN" 2>/dev/null || true
-
-    iptables -t nat -F "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t nat -D PREROUTING -j "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t nat -D POSTROUTING -j "$ROUTER_CHAIN" 2>/dev/null || true
-    iptables -t nat -X "$ROUTER_CHAIN" 2>/dev/null || true
+    remove_router_iptables "$WAN_IFACE"
 
     iptables -N "$ROUTER_CHAIN"
     iptables -A FORWARD -j "$ROUTER_CHAIN"
@@ -720,11 +883,12 @@ stop_systemd_resolved() {
     if systemctl is-active --quiet systemd-resolved; then
         warning "systemd-resolved is running and will conflict with Technitium DNS on port 53"
         log "Stopping systemd-resolved..."
+        backup_runtime_state
         systemctl stop systemd-resolved 2>/dev/null || true
         systemctl disable systemd-resolved 2>/dev/null || true
         if [ -L /etc/resolv.conf ]; then
             rm -f /etc/resolv.conf
-            echo "nameserver 127.0.0.1" > /etc/resolv.conf
+            printf 'nameserver 127.0.0.1\n' > /etc/resolv.conf
         fi
     fi
 }
@@ -794,6 +958,12 @@ service_mode_stop() {
     log "Router mode service stopping..."
     systemctl stop hostapd 2>/dev/null || true
     systemctl stop dnsmasq 2>/dev/null || true
+    if load_config; then
+        teardown_runtime_router_state
+    else
+        remove_router_iptables
+        restore_runtime_state
+    fi
     log "Router mode service stopped"
 }
 
@@ -911,9 +1081,11 @@ pick_wifi_channel() {
             log "Manual channel selection."
             log "Currently allowed 2.4GHz channels: ${allowed_channels:-unknown}"
             local manual_ch=""
+            local manual_freq=""
             while [[ ! "$manual_ch" =~ ^(1[0-4]|[1-9])$ ]]; do
                 read -p "Enter channel number (1-14): " manual_ch
             done
+            manual_freq=$(channel_to_frequency "$manual_ch" || true)
             case "$manual_ch" in
                 13)
                     if ! echo " ${allowed_channels} " | grep -q " 2472 "; then
@@ -928,7 +1100,7 @@ pick_wifi_channel() {
                     iw reg "$WIFI_COUNTRY_CODE" 2>/dev/null || true
                     ;;
                 *)
-                    if ! echo " ${allowed_channels} " | grep -q " 24${manual_ch}2 " && [ "$manual_ch" != "1" ] && [ "$manual_ch" != "2" ]; then
+                    if [ -n "$manual_freq" ] && ! echo " ${allowed_channels} " | grep -q " ${manual_freq} "; then
                         warning "Channel ${manual_ch} may be outside the regulatory allowed set; trying anyway."
                     fi
                     ;;
@@ -961,7 +1133,6 @@ interactive_mode() {
         fi
     fi
 
-    CONFIG_VALID=false
     ENABLE_AT_BOOT="n"
     DISABLE_GUI="n"
 
@@ -973,7 +1144,6 @@ interactive_mode() {
         DISABLE_GUI="${DISABLE_GUI:-n}"
 
         log "Starting hotspot with existing configuration..."
-        CONFIG_VALID=true
     else
         if [ -f "$CONFIG_FILE" ]; then
             warning "Configuration file found but invalid"
@@ -982,9 +1152,11 @@ interactive_mode() {
         fi
         log "Requesting information from user..."
 
-        AP_NAME=""
-        while ! validate_ssid "$AP_NAME"; do
+        while true; do
             read -p "Enter Access Point name (SSID): " AP_NAME
+            if validate_ssid "$AP_NAME"; then
+                break
+            fi
         done
 
         AP_PASSWORD=""
@@ -1014,16 +1186,15 @@ interactive_mode() {
         log "Using channel $WIFI_CHANNEL for 2.4GHz (non-overlapping)"
     fi
 
-    configure_persistent
-    install_script
-
     if apply_router_config; then
         trap - EXIT
 
         save_config
         log "Configuration saved in $CONFIG_FILE"
 
-        if [ "$CONFIG_VALID" = true ] || [[ ${ENABLE_AT_BOOT^^} == "Y" ]]; then
+        if [[ ${ENABLE_AT_BOOT^^} == "Y" ]]; then
+            configure_persistent
+            install_script
             create_systemd_service
 
             if [[ ${DISABLE_GUI^^} == "Y" ]]; then
@@ -1091,8 +1262,11 @@ set_wifi_credentials() {
     fi
 
     local new_ssid=""
-    while ! validate_ssid "$new_ssid"; do
+    while true; do
         read -p "New SSID: " new_ssid
+        if validate_ssid "$new_ssid"; then
+            break
+        fi
     done
 
     local new_password=""
@@ -1121,23 +1295,6 @@ set_wifi_credentials() {
     fi
 }
 
-init_logging
-check_root
-
-if [ "${1:-}" = "--service" ]; then
-    service_mode_start
-elif [ "${1:-}" = "--service-stop" ]; then
-    service_mode_stop
-    exit 0
-elif [ "${1:-}" = "--update-technitium" ]; then
-    check_root
-    update_technitium
-    exit 0
-elif [ "${1:-}" = "--set-wifi" ]; then
-    set_wifi_credentials
-    exit 0
-fi
-
 main() {
     AP_CLEAN=""
     if read -t 5 -p "Delete previous router configurations? (y/N): " AP_CLEAN 2>/dev/null; then
@@ -1161,4 +1318,22 @@ main() {
     interactive_mode
 }
 
-main
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    init_logging
+    check_root
+
+    if [ "${1:-}" = "--service" ]; then
+        service_mode_start
+    elif [ "${1:-}" = "--service-stop" ]; then
+        service_mode_stop
+        exit 0
+    elif [ "${1:-}" = "--update-technitium" ]; then
+        update_technitium
+        exit 0
+    elif [ "${1:-}" = "--set-wifi" ]; then
+        set_wifi_credentials
+        exit 0
+    fi
+
+    main
+fi

@@ -50,7 +50,7 @@ The script will prompt you for:
 5. **TTY mode** (if persistent): Disable graphical interface to save resources
 6. **Channel 13 (optional)**: If your regulatory domain allows channel 2472 MHz, you can opt into selecting channel 13 for a less crowded slice of the band. The script switches the country code to a domain (default: BO) and persists `REGDOMAIN` in `/etc/default/crda`.
 
-Technitium DNS is installed automatically if not present. If it's already installed, the script just ensures it's running.
+Technitium DNS is installed automatically if not present. The installer is downloaded from the official Technitium endpoint into a temporary file before execution. If it's already installed, the script just ensures it's running.
 
 ### Post-Installation
 
@@ -98,7 +98,7 @@ This updates `/etc/router-mode/config` and automatically restarts `router-mode.s
 
 - Main script logs: `router-mode.log` (inside project folder: `/home/routeur/Debian-to-router/router-mode.log`)
 - Old legacy log `/var/log/router-mode.log` is deleted automatically
-- On each run, the project log file is reset (old file removed, new one created)
+- The project log file is appended to across runs so previous failures remain visible
 
 ### Remove Configuration
 
