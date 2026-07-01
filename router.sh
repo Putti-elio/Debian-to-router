@@ -1176,14 +1176,35 @@ interactive_mode() {
             fi
         done
 
-        echo
-        read -p "Enable router functionality after reboot? (y/N): " ENABLE_AT_BOOT
-        echo
+    fi
 
-        if [[ ${ENABLE_AT_BOOT^^} == "Y" ]]; then
-            read -p "Disable graphical interface to save resources (boot to TTY)? (y/N): " DISABLE_GUI
-            echo
+    local boot_prompt_default="N"
+    local gui_prompt_default="N"
+    if [[ ${ENABLE_AT_BOOT^^} == "Y" ]]; then
+        boot_prompt_default="Y"
+    fi
+    if [[ ${DISABLE_GUI^^} == "Y" ]]; then
+        gui_prompt_default="Y"
+    fi
+
+    read -p "Enable router functionality after reboot? (y/N) [${boot_prompt_default}]: " ENABLE_AT_BOOT_INPUT
+    if [ -n "${ENABLE_AT_BOOT_INPUT:-}" ]; then
+        ENABLE_AT_BOOT="$ENABLE_AT_BOOT_INPUT"
+    else
+        ENABLE_AT_BOOT="$boot_prompt_default"
+    fi
+    echo
+
+    if [[ ${ENABLE_AT_BOOT^^} == "Y" ]]; then
+        read -p "Disable graphical interface to save resources (boot to TTY)? (y/N) [${gui_prompt_default}]: " DISABLE_GUI_INPUT
+        if [ -n "${DISABLE_GUI_INPUT:-}" ]; then
+            DISABLE_GUI="$DISABLE_GUI_INPUT"
+        else
+            DISABLE_GUI="$gui_prompt_default"
         fi
+        echo
+    else
+        DISABLE_GUI="n"
     fi
 
     if [ "${WIFI_BAND}" = "2.4" ]; then
