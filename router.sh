@@ -1118,6 +1118,11 @@ interactive_mode() {
     LAN_GW="${LAN_GW:-192.168.50.1}"
     LAN_DHCP_START="${LAN_DHCP_START:-192.168.50.50}"
     LAN_DHCP_END="${LAN_DHCP_END:-192.168.50.150}"
+    local config_loaded=false
+
+    if load_config; then
+        config_loaded=true
+    fi
 
     install_packages
     install_technitium || warning "Technitium DNS install failed, DNS may not work"
@@ -1136,7 +1141,7 @@ interactive_mode() {
     ENABLE_AT_BOOT="n"
     DISABLE_GUI="n"
 
-    if load_config && validate_config; then
+    if [ "$config_loaded" = true ] && validate_config; then
         log "Valid configuration found in $CONFIG_FILE"
         log "AP_NAME: $AP_NAME"
 
