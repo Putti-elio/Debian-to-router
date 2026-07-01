@@ -1138,9 +1138,6 @@ interactive_mode() {
         fi
     fi
 
-    ENABLE_AT_BOOT="n"
-    DISABLE_GUI="n"
-
     if [ "$config_loaded" = true ] && validate_config; then
         log "Valid configuration found in $CONFIG_FILE"
         log "AP_NAME: $AP_NAME"
@@ -1150,6 +1147,9 @@ interactive_mode() {
 
         log "Starting hotspot with existing configuration..."
     else
+        ENABLE_AT_BOOT="n"
+        DISABLE_GUI="n"
+
         if [ -f "$CONFIG_FILE" ]; then
             warning "Configuration file found but invalid"
         else
