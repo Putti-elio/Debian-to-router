@@ -146,7 +146,11 @@ snapshot() {
     run_or_note "Route to LAN client" ip route get "${CLIENT_IP:-$LAN_GW}"
     run_or_note "Route to external IP" ip route get "$EXTERNAL_IP"
     run_or_note "Wireless devices" iw dev
+    run_or_note "Associated stations" iw dev "$LAN_IFACE" station dump
+    run_or_note "Wireless driver info" ethtool -i "$LAN_IFACE"
+    run_or_note "USB runtime power state" sh -c "for file in /sys/class/net/$LAN_IFACE/device/power/control /sys/class/net/$LAN_IFACE/device/power/runtime_status /sys/class/net/$LAN_IFACE/device/power/autosuspend_delay_ms; do [ -e \"\$file\" ] && printf '%s: ' \"\$file\" && cat \"\$file\"; done"
     run_or_note "NetworkManager devices" nmcli device status
+    run_or_note "RFKill state" rfkill list
     run_or_note "Listening UDP sockets" ss -lunp
     run_or_note "Systemd service states" systemctl --no-pager --full status hostapd dnsmasq dns router-mode.service NetworkManager
 
@@ -160,6 +164,7 @@ snapshot() {
 
     run_or_note "DNS resolution" getent hosts "$DNS_NAME"
     run_or_note "hostapd and router logs" journalctl -u hostapd -u dnsmasq -u dns -u router-mode.service -u NetworkManager -n 60 --no-pager
+    run_or_note "Recent kernel Wi-Fi/USB logs" journalctl -k -n 120 --no-pager
 }
 
 iteration=0

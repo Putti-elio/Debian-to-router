@@ -181,6 +181,7 @@ The script is optimized for 2.4GHz operation:
 - **SOLO channel 14 mode**: A prompt offers a mode that locks the AP to channel 14 (2484 MHz). This is the channel authorized only in Japan (regulatory code `JP`). Using it outside Japan may violate local regulations — use at your own discretion. The script switches `country_code=JP` in hostapd and persists `REGDOMAIN=JP` to `/etc/default/crda`.
 - **Manual channel selection**: A 5th option lets you type a specific channel number (1-14). The script automatically picks the right regulatory country for the chosen channel (`CA` for 1-12, `BO` for 13, `JP` for 14) and warns if the channel is outside the current regulatory allowed set.
 - **Power save disabled**: Wi-Fi power save is turned off on the AP interface for stability.
+- **USB runtime PM disabled**: For USB Wi-Fi dongles, runtime power management is forced off (`power/control=on`) to avoid random AP drops caused by autosuspend.
 
 ## TTY Mode (Console Only)
 
@@ -239,6 +240,20 @@ curl http://192.168.50.1:5380/  # Web console
 rfkill list
 rfkill unblock wifi
 ```
+
+**Clients disconnect from the AP at random intervals:**
+
+```bash
+sudo ./diagnose-connectivity.sh --interval 5 --output /tmp/router-diag.log
+```
+
+Then wait for a dropout and inspect:
+
+- `journalctl -k -n 120 --no-pager` for USB resets, firmware crashes, or `wlanX: deauthenticated` events
+- `iw dev wlanX station dump` to see whether stations vanished from hostapd
+- `/sys/class/net/wlanX/device/power/control` to confirm USB autosuspend is disabled (`on`)
+
+If the AP disappears entirely, the most likely causes are the USB adapter/driver, insufficient USB power, or firmware instability rather than dnsmasq/Technitium.
 
 ## Security Notes
 

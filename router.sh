@@ -34,6 +34,7 @@ RESOLV_CONF_BACKUP="${CONFIG_DIR}/resolv.conf.backup"
 SYSTEMD_RESOLVED_STATE_FILE="${CONFIG_DIR}/systemd-resolved.state"
 SYSTEMD_RESOLVED_ACTIVE_FILE="${CONFIG_DIR}/systemd-resolved.active"
 LOG_FILE=""
+SYSFS_NET_DIR="/sys/class/net"
 
 init_logging() {
     if [ -d "$PROJECT_LOG_DIR" ]; then
@@ -675,6 +676,27 @@ apply_regulatory_domain() {
     fi
 }
 
+disable_interface_runtime_power_management() {
+    local iface="$1"
+    local power_control="${SYSFS_NET_DIR}/${iface}/device/power/control"
+    local autosuspend_delay="${SYSFS_NET_DIR}/${iface}/device/power/autosuspend_delay_ms"
+
+    if [ ! -e "$power_control" ]; then
+        return 0
+    fi
+
+    if ! printf 'on' > "$power_control" 2>/dev/null; then
+        warning "Unable to disable runtime power management for $iface"
+        return 0
+    fi
+
+    if [ -w "$autosuspend_delay" ]; then
+        printf '%s' '-1' > "$autosuspend_delay" 2>/dev/null || true
+    fi
+
+    log "Runtime power management disabled for $iface"
+}
+
 configure_hostapd() {
     log "Configuring hostapd..."
     [ -f /etc/hostapd/hostapd.conf ] && [ ! -f /etc/hostapd/default_hostapd.conf ] && \
@@ -901,6 +923,7 @@ apply_router_config() {
     stop_systemd_resolved
     configure_network_interface
     iw dev "$AP_IFACE" set power_save off 2>/dev/null || true
+    disable_interface_runtime_power_management "$AP_IFACE"
     apply_regulatory_domain
     enable_ip_forwarding
     configure_hostapd

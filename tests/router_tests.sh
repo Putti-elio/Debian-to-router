@@ -89,6 +89,17 @@ run_tests() {
     assert_eq '2484' "$(channel_to_frequency 14)" 'Channel 14 frequency mismatch'
     assert_fail "Invalid channel should fail" channel_to_frequency 15
 
+    local sysfs_root="$TMPDIR_TEST/sys"
+    mkdir -p "$sysfs_root/wlan0/device/power"
+    printf 'auto' > "$sysfs_root/wlan0/device/power/control"
+    printf '2000' > "$sysfs_root/wlan0/device/power/autosuspend_delay_ms"
+
+    SYSFS_NET_DIR="$sysfs_root"
+    LOG_FILE="$TMPDIR_TEST/power.log"
+    assert_ok "disable_interface_runtime_power_management should succeed" disable_interface_runtime_power_management wlan0
+    assert_eq 'on' "$(cat "$sysfs_root/wlan0/device/power/control")" 'runtime PM control should be forced on'
+    assert_eq '-1' "$(cat "$sysfs_root/wlan0/device/power/autosuspend_delay_ms")" 'autosuspend delay should be disabled'
+
     printf 'PASS\n'
 }
 
