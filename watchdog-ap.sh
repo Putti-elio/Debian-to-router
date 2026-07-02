@@ -4,6 +4,7 @@ set -euo pipefail
 CONFIG_FILE="/etc/router-mode/config"
 ROUTER_SERVICE="router-mode.service"
 HOSTAPD_SERVICE="hostapd.service"
+ROUTER_SCRIPT="/usr/local/sbin/router-mode"
 LOG_TAG="router-ap-watchdog"
 
 log() {
@@ -20,8 +21,8 @@ load_config() {
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
 
-    if [ -z "${AP_IFACE:-}" ]; then
-        log "AP_IFACE missing from $CONFIG_FILE"
+    if [ -z "${AP_NAME:-}" ] || [ -z "${AP_PASSWORD:-}" ]; then
+        log "AP configuration is incomplete in $CONFIG_FILE"
         return 1
     fi
 }
@@ -39,8 +40,20 @@ ap_is_advertised() {
 }
 
 restart_router() {
-    log "Restarting $ROUTER_SERVICE because AP health check failed"
-    systemctl restart "$ROUTER_SERVICE"
+    if systemctl list-unit-files "$ROUTER_SERVICE" >/dev/null 2>&1; then
+        log "Restarting $ROUTER_SERVICE for $AP_IFACE"
+        systemctl restart "$ROUTER_SERVICE"
+        return
+    fi
+
+    if [ -x "$ROUTER_SCRIPT" ]; then
+        log "Starting AP via $ROUTER_SCRIPT --service for $AP_IFACE"
+        "$ROUTER_SCRIPT" --service
+        return
+    fi
+
+    log "Neither $ROUTER_SERVICE nor $ROUTER_SCRIPT is available for AP recovery"
+    exit 1
 }
 
 main() {

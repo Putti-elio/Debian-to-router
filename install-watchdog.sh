@@ -10,6 +10,7 @@ TIMER_SRC="$SCRIPT_DIR/systemd/router-ap-watchdog.timer"
 TIMER_DST="/etc/systemd/system/router-ap-watchdog.timer"
 ROUTER_CONFIG_FILE="/etc/router-mode/config"
 ROUTER_SERVICE="router-mode.service"
+AP_IFACE=""
 
 require_command() {
     local command_name="$1"
@@ -30,6 +31,20 @@ require_router_config() {
         printf 'AP_IFACE is missing from %s\n' "$ROUTER_CONFIG_FILE" >&2
         exit 1
     fi
+
+    AP_IFACE=$(sed -n 's/^AP_IFACE="\(.*\)"$/\1/p' "$ROUTER_CONFIG_FILE" | head -n 1)
+    if [ -z "$AP_IFACE" ]; then
+        printf 'AP_IFACE could not be parsed from %s\n' "$ROUTER_CONFIG_FILE" >&2
+        exit 1
+    fi
+}
+
+require_ap_interface_present() {
+    if ! ip link show "$AP_IFACE" >/dev/null 2>&1; then
+        printf 'Configured AP interface is missing: %s\n' "$AP_IFACE" >&2
+        printf 'Plug the Wi-Fi adapter back in and rerun the installer.\n' >&2
+        exit 1
+    fi
 }
 
 require_router_service() {
@@ -45,7 +60,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-for required_command in install systemctl systemd-analyze bash; do
+for required_command in install systemctl systemd-analyze bash ip sed; do
     require_command "$required_command"
 done
 
@@ -58,6 +73,7 @@ done
 
 require_router_service
 require_router_config
+require_ap_interface_present
 
 bash -n "$WATCHDOG_SCRIPT_SRC"
 
