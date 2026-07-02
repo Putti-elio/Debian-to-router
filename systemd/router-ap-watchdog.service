@@ -1,0 +1,7 @@
+[Unit]
+Description=Check Wi-Fi AP health and recover router mode if needed
+After=router-mode.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/router-ap-watchdog

@@ -66,6 +66,23 @@ systemctl status hostapd dnsmasq dns
 journalctl -u router-mode -f
 ```
 
+### AP Watchdog
+
+If your USB Wi-Fi adapter sometimes stops broadcasting the SSID, you can enable a watchdog that checks the AP every 30 seconds and restarts `router-mode.service` automatically if needed.
+
+Install it:
+
+```bash
+sudo ./install-watchdog.sh
+```
+
+Check status:
+
+```bash
+systemctl status router-ap-watchdog.timer router-ap-watchdog.service --no-pager
+journalctl -u router-ap-watchdog.service -n 50 --no-pager
+```
+
 ### Technitium DNS Web Console
 
 After setup, access the Technitium DNS web interface to configure ad-blocking:

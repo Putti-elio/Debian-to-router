@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic Wi-Fi AP watchdog
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=router-ap-watchdog.service
+
+[Install]
+WantedBy=timers.target
