@@ -727,6 +727,8 @@ wpa=2
 wpa_passphrase=$AP_PASSWORD
 wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
+ap_max_inactivity=300
+disassoc_low_ack=0
 
 ignore_broadcast_ssid=0
 macaddr_acl=0
@@ -751,6 +753,8 @@ wpa=2
 wpa_passphrase=$AP_PASSWORD
 wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
+ap_max_inactivity=300
+disassoc_low_ack=0
 
 ignore_broadcast_ssid=0
 macaddr_acl=0
